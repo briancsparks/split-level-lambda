@@ -11,6 +11,7 @@ errcho() { echo "$@" 1>&2; }
 die() { errcho "$@"; exit 1; }
 
 pre_announce() {
+  SECONDS=0
   echo ""
   echo "============================================================================================================="
   printf "    %s\n" "$1"
@@ -18,7 +19,7 @@ pre_announce() {
 }
 
 announce_time() {
-  printf "\n ---------- \n ---------- %s %d seconds\n ----------\n\n" "$1" "$2"
+  printf "\n ---------- \n ---------- %s %d seconds\n ----------\n\n" "$1" $SECONDS
 }
 
 
@@ -67,7 +68,6 @@ if [[ -n $BUILD_LAYER ]]; then
 
   # ==================================================================================================================
   pre_announce "Building layer"
-  SECONDS=0
 
   cd /work/nodejs
   [[ -f /src/package.json       ]] && cp /src/package.json            ./
@@ -80,37 +80,34 @@ if [[ -n $BUILD_LAYER ]]; then
   # Remove aws-sdk, it is already on lambda
   rm -rf node_modules/aws-sdk
 
-  announce_time "Building layer took" $SECONDS
+  announce_time "Building layer took"
 
 
 
   # ==================================================================================================================
   pre_announce "Pack node_modules/... into zip file"
-  SECONDS=0
 
   cd        /work
   zip -q -r /work/${LAYER_NAME}.zip nodejs
   ls -l     /work/${LAYER_NAME}.zip
   cd        /work/nodejs
 
-  announce_time "Pack node_modules/... into zip file took" $SECONDS
+  announce_time "Pack node_modules/... into zip file took"
 
 
 
   # ==================================================================================================================
   pre_announce "Putting node_modules/... zip onto S3"
-  SECONDS=0
 
   aws s3 cp /work/${LAYER_NAME}.zip  "$S3_LAYER_PATH"
 
-  announce_time "Putting node_modules/... zip onto S3 took" $SECONDS
+  announce_time "Putting node_modules/... zip onto S3 took"
 
 
 
 
   # ==================================================================================================================
   pre_announce "Publishing layer file via AWS API"
-  SECONDS=0
 
   #ls -l /work/${LAYER_NAME}.zip
 
@@ -127,14 +124,13 @@ if [[ -n $BUILD_LAYER ]]; then
   [[ -f /src/package-lock.json  ]] && aws s3 cp /src/package-lock.json "$S3_LAYER_PATH"
   [[ -f /src/yarn.lock          ]] && aws s3 cp /src/yarn.lock         "$S3_LAYER_PATH"
 
-  announce_time "Publishing layer file took" $SECONDS
+  announce_time "Publishing layer file took"
 
 fi
 
 
 # ==================================================================================================================
 pre_announce "Building source"
-SECONDS=0
 
 # Clear out the version that was built above
 cd        /
@@ -149,7 +145,7 @@ cat /work/nodejs/package.json | jq '.'
 
 #tree    /work/nodejs
 
-announce_time "Building source took" $SECONDS
+announce_time "Building source took"
 
 
 
@@ -157,12 +153,11 @@ announce_time "Building source took" $SECONDS
 
 # ==================================================================================================================
 pre_announce "Pack source into zip file"
-SECONDS=0
 
 (cd /work/nodejs && claudia pack --output /work/package.zip)
 ls -l /work/package.zip
 
-announce_time "Pack source into zip file took" $SECONDS
+announce_time "Pack source into zip file took"
 
 
 
@@ -170,11 +165,10 @@ announce_time "Pack source into zip file took" $SECONDS
 
 # ==================================================================================================================
 pre_announce "Putting zip onto S3"
-SECONDS=0
 
 aws s3 cp /work/package.zip             "s3://${BUCKET_NAME}/quick-net/lambdas/${LAMBDA_NAME}/"
 
-announce_time "Putting zip onto S3 took" $SECONDS
+announce_time "Putting zip onto S3 took"
 
 
 
@@ -183,7 +177,6 @@ announce_time "Putting zip onto S3 took" $SECONDS
 
 # ==================================================================================================================
 pre_announce "Updating code"
-SECONDS=0
 
 aws lambda update-function-code \
     --region "$AWS_REGION" \
@@ -192,7 +185,7 @@ aws lambda update-function-code \
 
 cat /tmp/update-function-code-result.json | jq -r '.FunctionArn'
 
-announce_time "Updating code took" $SECONDS
+announce_time "Updating code took"
 
 
 
@@ -204,7 +197,6 @@ LAYER_ARN="$(aws lambda list-layers --region "$AWS_REGION"  | jq -r ".Layers[].L
 
 if [[ -n $LAYER_ARN ]]; then
   pre_announce "Attaching layer ${LAYER_ARN}"
-  SECONDS=0
 
   aws lambda update-function-configuration        \
       --region "$AWS_REGION"                      \
@@ -213,7 +205,7 @@ if [[ -n $LAYER_ARN ]]; then
 
   cat /tmp/update-function-configuration-result.json | jq -r '.FunctionArn'
 
-  announce_time "Attaching layer took" $SECONDS
+  announce_time "Attaching layer took"
 fi
 
 
@@ -223,7 +215,6 @@ fi
 
 # ==================================================================================================================
 pre_announce "Adding env"
-SECONDS=0
 
 aws lambda update-function-configuration          \
     --region "$AWS_REGION"                        \
@@ -232,7 +223,7 @@ aws lambda update-function-configuration          \
 
 cat /tmp/update-function-configuration-result.json | jq -r '.FunctionArn'
 
-announce_time "Adding env took" $SECONDS
+announce_time "Adding env took"
 
 
 
@@ -241,7 +232,6 @@ announce_time "Adding env took" $SECONDS
 ## ==================================================================================================================
 ## This one is to create a function new
 #pre_announce "Creating Function?"
-#SECONDS=0
 #
 #aws lambda create-function \
 #    --region "$AWS_REGION" \
@@ -255,7 +245,7 @@ announce_time "Adding env took" $SECONDS
 #    --memory-size "128" \
 #    --vpc-config "SubnetIds=${subnet_ids},SecurityGroupIds=${sg_ids}"
 #
-#announce_time "Creating Function took" $SECONDS
+#announce_time "Creating Function took"
 
 
 
