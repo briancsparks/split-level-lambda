@@ -1,0 +1,9 @@
+#!/bin/bash -e
+
+script_dir="$( cd "$(dirname "$( readlink -f "${BASH_SOURCE[0]}" )" )" && pwd )"
+
+errcho() { echo "$@" 1>&2; }
+die() { errcho "$@"; exit 1; }
+
+docker build -t split-level-lambda --progress tty -f "${script_dir}/../Dockerfile" "${script_dir}/.."
+

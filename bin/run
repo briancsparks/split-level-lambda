@@ -1,0 +1,35 @@
+#!/bin/bash -e
+
+script_dir="$( cd "$(dirname "$( readlink -f "${BASH_SOURCE[0]}" )" )" && pwd )"
+
+errcho() { echo "$@" 1>&2; }
+die() { errcho "$@"; exit 1; }
+
+jsonval() {
+  local json="$1"
+  local key="$2"
+
+  echo "$json" | jq -r "$key"
+}
+
+slljson="{}"
+[[ -x "`pwd`/split-level-lambda.json.js" ]] && slljson="$(`pwd`/split-level-lambda.json.js)"
+
+[[ -z $BUCKET_NAME        ]] && BUCKET_NAME="$(jsonval "$slljson" ".BUCKET_NAME")"
+[[ -z $LAMBDA_NAME        ]] && LAMBDA_NAME="$(cat claudia.json | jq -r '.lambda.name')"
+
+PARAMS=" -v `pwd`:/src"
+
+[[ -d $HOME/.aws          ]] && PARAMS="$PARAMS -v ${HOME}/.aws:/aws"
+[[ -n $AWS_PROFILE        ]] && PARAMS="$PARAMS -e AWS_PROFILE=$AWS_PROFILE"
+[[ -n $BUILD_LAYER        ]] && PARAMS="$PARAMS -e BUILD_LAYER=$BUILD_LAYER"
+
+docker run --rm                                                           \
+    $PARAMS                                                               \
+    -e LAMBDA_NAME=$LAMBDA_NAME                                           \
+    -e BUCKET_NAME=$BUCKET_NAME                                           \
+    -e ENVIRONMENT_FILE="$(jsonval "$slljson" ".ENVIRONMENT_FILE")"       \
+    -e subnet_ids="$(jsonval "$slljson" ".subnet_ids")"                   \
+    -e sg_ids="$(jsonval "$slljson" ".sg_ids")"                           \
+    split-level-lambda
+

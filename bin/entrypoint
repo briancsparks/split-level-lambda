@@ -1,0 +1,267 @@
+#!/bin/bash -e
+
+echo "##############################################################################################################"
+echo "entrypoint script" "$@"
+echo ""
+
+# ==================================================================================================================
+script_dir="$( cd "$(dirname "$( readlink -f "${BASH_SOURCE[0]}" )" )" && pwd )"
+
+errcho() { echo "$@" 1>&2; }
+die() { errcho "$@"; exit 1; }
+
+pre_announce() {
+  echo ""
+  echo "============================================================================================================="
+  printf "    %s\n" "$1"
+  echo ""
+}
+
+announce_time() {
+  printf "\n ---------- \n ---------- %s %d seconds\n ----------\n\n" "$1" "$2"
+}
+
+
+# ==================================================================================================================
+# Prerequisites
+#[[ -f /aws/credentials    ]] || die "Need to map ~/.aws -- '-v $HOME/.aws:/aws'"
+#[[ -f /aws/config         ]] || die "Need to map ~/.aws -- '-v $HOME/.aws:/aws'"
+[[ -d /src                ]] || die "Need /src dir"
+
+#[[ -z $AWS_PROFILE        ]] || die "Need AWS_PROFILE"
+[[ -n $LAMBDA_NAME        ]] || die "Need LAMBDA_NAME"
+[[ -n $BUCKET_NAME        ]] || die "Need BUCKET_NAME"
+[[ -n $ENVIRONMENT_FILE   ]] || die "Need ENVIRONMENT_FILE"
+
+[[ -n $AWS_REGION         ]] || AWS_REGION="us-east-1"
+
+
+LAYER_NAME="node_modules-for-$LAMBDA_NAME"
+S3_LAYER_PATH="s3://${BUCKET_NAME}/quick-net/lambda-layers/${LAYER_NAME}"
+
+export AWS_SHARED_CREDENTIALS_FILE="/aws/credentials"
+export AWS_CONFIG_FILE="/aws/config"
+
+AWS_ACCT="$(aws sts get-caller-identity | jq -r '.Account')"
+
+
+# WORKDIR /work/nodejs
+
+
+# ==================================================================================================================
+
+if ! aws s3 ls "${S3_LAYER_PATH}/package.json"; then
+  echo "source package.json for current layer missing from S3... rebuilding layer"
+  BUILD_LAYER="1"
+
+elif ! cmp <(jq -S . /src/package.json) <(aws s3 cp "${S3_LAYER_PATH}/package.json" - | jq -S .); then
+  echo "source package.json for current layer is different... rebuilding layer"
+  BUILD_LAYER="1"
+
+else
+  echo "source package.json for current layer is same as package.json"
+
+fi
+
+if [[ -n $BUILD_LAYER ]]; then
+
+  # ==================================================================================================================
+  pre_announce "Building layer"
+  SECONDS=0
+
+  cd /work/nodejs
+  [[ -f /src/package.json       ]] && cp /src/package.json            ./
+  [[ -f /src/package-lock.json  ]] && cp /src/package-lock.json       ./
+  [[ -f /src/yarn.lock          ]] && cp /src/yarn.lock               ./
+
+  # Invoke npm install... or yarn...
+  ../sll/bin/npm-install-or-yarn
+
+  # Remove aws-sdk, it is already on lambda
+  rm -rf node_modules/aws-sdk
+
+  announce_time "Building layer took" $SECONDS
+
+
+
+  # ==================================================================================================================
+  pre_announce "Pack node_modules/... into zip file"
+  SECONDS=0
+
+  cd        /work
+  zip -q -r /work/${LAYER_NAME}.zip nodejs
+  ls -l     /work/${LAYER_NAME}.zip
+  cd        /work/nodejs
+
+  announce_time "Pack node_modules/... into zip file took" $SECONDS
+
+
+
+  # ==================================================================================================================
+  pre_announce "Putting node_modules/... zip onto S3"
+  SECONDS=0
+
+  aws s3 cp /work/${LAYER_NAME}.zip  "$S3_LAYER_PATH"
+
+  announce_time "Putting node_modules/... zip onto S3 took" $SECONDS
+
+
+
+
+  # ==================================================================================================================
+  pre_announce "Publishing layer file via AWS API"
+  SECONDS=0
+
+  #ls -l /work/${LAYER_NAME}.zip
+
+  aws lambda publish-layer-version  --region "$AWS_REGION" --layer-name "$LAYER_NAME"                     \
+                                    --description "dependencies for $LAMBDA_NAME function"    \
+                                    --zip-file "fileb:///work/${LAYER_NAME}.zip"                \
+                                    --compatible-runtimes "nodejs12.x" > "publish-node_modules-version-result.json"
+
+  layer_arn="$(cat publish-node_modules-version-result.json | jq -r '.LayerVersionArn')"
+  echo "Layer ARN: | $layer_arn |"
+
+  aws s3 cp /src/package.json "$S3_LAYER_PATH"
+
+  [[ -f /src/package-lock.json  ]] && aws s3 cp /src/package-lock.json "$S3_LAYER_PATH"
+  [[ -f /src/yarn.lock          ]] && aws s3 cp /src/yarn.lock         "$S3_LAYER_PATH"
+
+  announce_time "Publishing layer file took" $SECONDS
+
+fi
+
+
+# ==================================================================================================================
+pre_announce "Building source"
+SECONDS=0
+
+# Clear out the version that was built above
+cd        /
+rm -rf    /work/nodejs
+mkdir -p  /work/nodejs
+cd        /work/nodejs
+
+rsync -av --progress   /src/  /work/nodejs                --exclude node_modules
+cat     /src/package.json \
+        | jq 'del(.dependencies) + {dependencies:{}, devDependencies:{}}' > /work/nodejs/package.json
+cat /work/nodejs/package.json | jq '.'
+
+#tree    /work/nodejs
+
+announce_time "Building source took" $SECONDS
+
+
+
+
+
+# ==================================================================================================================
+pre_announce "Pack source into zip file"
+SECONDS=0
+
+(cd /work/nodejs && claudia pack --output /work/package.zip)
+ls -l /work/package.zip
+
+announce_time "Pack source into zip file took" $SECONDS
+
+
+
+
+
+# ==================================================================================================================
+pre_announce "Putting zip onto S3"
+SECONDS=0
+
+aws s3 cp /work/package.zip             "s3://${BUCKET_NAME}/quick-net/lambdas/${LAMBDA_NAME}/"
+
+announce_time "Putting zip onto S3 took" $SECONDS
+
+
+
+
+
+
+# ==================================================================================================================
+pre_announce "Updating code"
+SECONDS=0
+
+aws lambda update-function-code \
+    --region "$AWS_REGION" \
+    --function-name "$LAMBDA_NAME" \
+    --zip-file "fileb:///work/package.zip" > /tmp/update-function-code-result.json
+
+cat /tmp/update-function-code-result.json | jq -r '.FunctionArn'
+
+announce_time "Updating code took" $SECONDS
+
+
+
+
+# ==================================================================================================================
+# Now, we have to attach the layer
+
+LAYER_ARN="$(aws lambda list-layers --region "$AWS_REGION"  | jq -r ".Layers[].LatestMatchingVersion.LayerVersionArn" | egrep ":${LAYER_NAME}:")"
+
+if [[ -n $LAYER_ARN ]]; then
+  pre_announce "Attaching layer ${LAYER_ARN}"
+  SECONDS=0
+
+  aws lambda update-function-configuration        \
+      --region "$AWS_REGION"                      \
+      --function-name "$LAMBDA_NAME"              \
+      --layers $LAYER_ARN > /tmp/update-function-configuration-result.json
+
+  cat /tmp/update-function-configuration-result.json | jq -r '.FunctionArn'
+
+  announce_time "Attaching layer took" $SECONDS
+fi
+
+
+
+
+
+
+# ==================================================================================================================
+pre_announce "Adding env"
+SECONDS=0
+
+aws lambda update-function-configuration          \
+    --region "$AWS_REGION"                        \
+    --function-name "$LAMBDA_NAME"                \
+    --environment "{\"Variables\":$(cat $ENVIRONMENT_FILE)}" > /tmp/update-function-configuration.json
+
+cat /tmp/update-function-configuration-result.json | jq -r '.FunctionArn'
+
+announce_time "Adding env took" $SECONDS
+
+
+
+
+
+## ==================================================================================================================
+## This one is to create a function new
+#pre_announce "Creating Function?"
+#SECONDS=0
+#
+#aws lambda create-function \
+#    --region "$AWS_REGION" \
+#    --function-name "arn:aws:lambda:us-east-1:${AWS_ACCT}:function:${LAMBDA_NAME}:\$LATEST" \
+#    --runtime "nodejs12.x" \
+#    --role "arn:aws:iam::${AWS_ACCT}:role/${LAMBDA_NAME}-instance-role" \
+#    --handler "lambda.handler" \
+#    --code "S3Bucket=${BUCKET_NAME},S3Key=quick-net/lambdas/${LAMBDA_NAME}/package.zip" \
+#    --description "${LAMBDA_NAME}" \
+#    --timeout 12 \
+#    --memory-size "128" \
+#    --vpc-config "SubnetIds=${subnet_ids},SecurityGroupIds=${sg_ids}"
+#
+#announce_time "Creating Function took" $SECONDS
+
+
+
+
+
+#WORKDIR /work/sll/bin
+#WORKDIR /work/sll/app
+#WORKDIR /work/nodejs
+
